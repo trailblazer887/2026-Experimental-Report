@@ -1,0 +1,233 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage{ctex}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+
+% 代码高亮设置
+\lstset{
+    language=Verilog,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{gray},
+    numbers=left,
+    numberstyle=\tiny,
+    frame=single,
+    breaklines=true
+}
+
+\begin{document}
+
+\title{\textbf{定点乘法器性能优化实验报告}}
+\date{\today}
+\maketitle
+
+\section{实验目标}
+\begin{enumerate}
+    \item 理解原始32位串行乘法器的工作原理（32个时钟周期完成运算）。
+    \item 对乘法器进行最简单有效的性能优化，将时钟周期从32周期减少至16周期。
+    \item 采用2位并行乘法方式，实现硬件开销小、实现最简单的优化方案。
+    \item 完成功能仿真与上板验证，确保优化后乘法器结果正确。
+    \item 对比优化前后性能，完成实验分析与总结。
+\end{enumerate}
+
+\section{实验原理图}
+\subsection{2位并行乘法器结构原理图}
+本实验采用2位并行乘法优化方案，每次同时读取乘数低2位，根据不同组合生成0倍、1倍、2倍、3倍被乘数，作为部分积参与累加，从而将时钟周期减少一半。
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{原理图.jpg}
+    \caption{2位并行乘法器硬件结构图}
+    \label{fig:mult}
+\end{figure}
+
+\subsection{原理说明}
+\begin{enumerate}
+    \item \textbf{符号与绝对值处理单元}：提取操作数符号位，对负数进行取反加1得到绝对值。
+    \item \textbf{被乘数寄存器}：64位，每次左移2位。
+    \item \textbf{乘数寄存器}：32位，每次右移2位。
+    \item \textbf{2位编码与部分积生成单元}：根据乘数低两位选择部分积（0、×1、×2、×3）。
+    \item \textbf{累加寄存器}：对部分积进行累加。
+    \item \textbf{控制单元}：判断乘数是否为0，产生乘法结束信号。
+    \item \textbf{符号修正单元}：根据符号位异或结果，对最终乘积进行符号修正。
+\end{enumerate}
+
+\section{实验过程与代码实现}
+本次实验仅修改 \texttt{multiply.v} 文件，保持其他模块不变。
+
+\subsection{核心优化思路}
+\begin{itemize}
+    \item 原始乘法：每次处理1位，需要32个时钟周期。
+    \item 优化乘法：每次处理2位，只需要16个时钟周期。
+    \item 部分积直接由移位和加法生成，硬件最简单、最容易实现。
+\end{itemize}
+
+\subsection{优化后Verilog代码}
+\begin{lstlisting}
+`timescale 1ns / 1ps
+
+module multiply(              // 乘法器
+    input         clk,        // 时钟
+    input         mult_begin, // 乘法开始信号
+    input  [31:0] mult_op1,   // 乘法源操作数1
+    input  [31:0] mult_op2,   // 乘法源操作数2
+    output [63:0] product,    // 乘积
+    output        mult_end    // 乘法结束信号
+);
+
+    //乘法正在运算信号和结束信号
+    reg mult_valid;
+    assign mult_end = mult_valid & ~(|multiplier); //乘法结束信号：乘数全0
+    always @(posedge clk)
+    begin
+        if (!mult_begin || mult_end)
+        begin
+            mult_valid <= 1'b0;
+        end
+        else
+        begin
+            mult_valid <= 1'b1;
+        end
+    end
+
+    //两个源操作取绝对值
+    wire        op1_sign;      //操作数1的符号位
+    wire        op2_sign;      //操作数2的符号位
+    wire [31:0] op1_absolute;  //操作数1的绝对值
+    wire [31:0] op2_absolute;  //操作数2的绝对值
+    assign op1_sign = mult_op1[31];
+    assign op2_sign = mult_op2[31];
+    assign op1_absolute = op1_sign ? (~mult_op1+1) : mult_op1;
+    assign op2_absolute = op2_sign ? (~mult_op2+1) : mult_op2;
+
+    //被乘数，每次左移2位
+    reg  [63:0] multiplicand;
+    always @ (posedge clk)
+    begin
+        if (mult_valid)
+        begin    
+            multiplicand <= {multiplicand[61:0],2'b0};
+        end
+        else if (mult_begin) 
+        begin   
+            multiplicand <= {32'd0,op1_absolute};
+        end
+    end
+
+    //乘数，每次右移2位
+    reg  [31:0] multiplier;
+    always @ (posedge clk)
+    begin
+        if (mult_valid)
+        begin   
+            multiplier <= {2'b0,multiplier[31:2]}; 
+        end
+        else if (mult_begin)
+        begin   
+            multiplier <= op2_absolute; 
+        end
+    end
+
+    // 2位并行部分积生成
+    wire [63:0] partial_product;
+    assign partial_product = (multiplier[1:0] == 2'b00) ? 64'd0 : 
+                            (multiplier[1:0] == 2'b01) ? multiplicand : 
+                            (multiplier[1:0] == 2'b10) ? (multiplicand << 1) : 
+                            (multiplicand + (multiplicand << 1));
+
+    //累加器
+    reg [63:0] product_temp;
+    always @ (posedge clk)
+    begin
+        if (mult_valid)
+        begin
+            product_temp <= product_temp + partial_product;
+        end
+        else if (mult_begin) 
+        begin
+            product_temp <= 64'd0;  
+        end
+    end 
+
+    //结果符号处理
+    reg product_sign;
+    always @ (posedge clk)
+    begin
+        if (mult_valid)
+        begin
+              product_sign <= op1_sign ^ op2_sign;
+        end
+    end 
+    assign product = product_sign ? (~product_temp+1) : product_temp;
+endmodule
+\end{lstlisting}
+
+\section{实验结果与分析}
+\subsection{仿真波形图}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{波形图.jpg}
+    \caption{乘法器仿真波形图}
+\end{figure}
+
+\textbf{波形说明：}
+\begin{itemize}
+    \item 乘法启动信号 \texttt{mult\_begin} 有效后，乘法器开始工作。
+    \item 乘数每次右移2位，被乘数每次左移2位，周期数大幅减少。
+    \item 16个时钟周期后 \texttt{mult\_end} 拉高，表示乘法完成。
+    \item 输出乘积 \texttt{product} 与理论计算值完全一致，结果正确。
+\end{itemize}
+
+\subsection{优化前后时钟周期对比}
+\begin{table}[H]
+    \centering
+    \begin{tabular}{|c|c|}
+        \hline
+        乘法器类型 & 完成32位乘法所需时钟周期 \\
+        \hline
+        原始串行乘法器 & 32 周期 \\
+        \hline
+        2位并行优化乘法器 & 16 周期 \\
+        \hline
+    \end{tabular}
+    \caption{性能对比表}
+\end{table}
+
+\textbf{结论：}
+优化后乘法器时钟周期减少50\%，性能提升一倍，硬件实现简单，资源开销小。
+
+\subsection{3. 上板验证结果}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{1.jpg}
+    \caption{实验箱上板验证结果1}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.8\textwidth]{2.jpg}
+    \caption{实验箱上板验证结果2}
+\end{figure}
+
+\textbf{结果说明：} \\
+多次测试均正确，优化后乘法器功能完全正常。
+
+\section{实验收获与感想}
+通过本次定点乘法器优化实验，我收获如下：
+\begin{enumerate}
+    \item 理解了原始串行乘法器需要逐位计算，周期长、效率低。
+    \item 掌握了最简单有效的2位并行乘法优化方法，只需修改移位位数和部分积判断，即可将周期减半。
+    \item 学会了部分积的生成方式：使用移位和加法实现×1、×2、×3，无需乘法器，硬件更简洁高效。
+    \item 完成了从代码编写、功能仿真到上板验证的完整流程，提升了硬件设计能力。
+    \item 认识到计算机组成原理中“并行化”是提升运算速度的核心思想，简单优化即可带来明显性能提升。
+\end{enumerate}
+
+\section{实验总结}
+本次实验成功完成了32位定点乘法器的性能优化，采用2位并行乘法方式，将运算周期从32个时钟周期减少至16个时钟周期，性能提升一倍。
+优化后的乘法器逻辑简单、易于实现、资源占用少，仿真与上板验证均证明结果正确。
+
+\end{document}

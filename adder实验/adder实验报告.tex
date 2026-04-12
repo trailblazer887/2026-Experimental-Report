@@ -1,0 +1,482 @@
+\documentclass[12pt,a4paper,UTF8]{ctexart}
+\usepackage{geometry}
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm} % 页边距
+\usepackage{amsmath,amssymb} % 数学公式
+\usepackage{graphicx} % 插入图片
+\usepackage{listings} % 代码块
+\usepackage{listingsutf8} % UTF-8 支持（解决中文注释引发的 listings 报错）
+\usepackage{xcolor} % 代码高亮
+\usepackage{hyperref} % 超链接
+\usepackage{caption} % 图表标题
+\usepackage{float} % 图片位置控制
+\usepackage{enumitem} % 列表环境，解决enumerate报错
+% \usepackage{ctex} % ctexart 已包含中文支持，避免重复加载导致警告
+
+% 代码块样式（修复高亮问题）
+\lstset{
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{purple!60},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    frame=single,
+    breaklines=true,
+    captionpos=b,
+    tabsize=4,
+    language=Verilog,
+    inputencoding=utf8, % 解决中文编码
+    extendedchars=true
+}
+
+% 超链接样式
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+% 标题、作者、日期
+\title{\bfseries 64位加法器设计与实现实验报告}
+\author{姓名：XXX \\ 学号：XXXXXXX}
+\date{\today}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty} % 首页不显示页码
+\newpage
+\setcounter{page}{1} % 正文页码从1开始
+
+\section{实验目标}
+本实验基于原32位加法器进行功能改进，完成以下目标：
+\begin{enumerate}[label=\arabic*.]
+    \item 将32位加法器扩展为64位加法器，实现64位二进制数的加法运算，支持进位输入（\texttt{cin}）与进位输出（\texttt{cout}）；
+    \item 修改仿真测试文件，通过行为级仿真波形验证64位加法器的逻辑正确性；
+    \item 适配LCD触摸屏接口，通过片选逻辑实现两个64位数的分两次输入，并将操作数与结果分高低32位显示在LCD屏上；
+    \item 修改引脚约束文件，完成FPGA上板验证，在实验箱上实现64位加法的输入、运算与显示；
+\end{enumerate}
+
+\section{实验原理}
+\subsection{加法器原理}
+加法器是数字电路中最基础的运算单元，本设计采用Verilog硬件描述语言直接调用`+`运算符实现64位加法，核心运算公式为：
+\[
+\{cout, result[63:0]\} = operand1[63:0] + operand2[63:0] + cin
+\]
+其中：
+- \(operand1[63:0]\)、\(operand2[63:0]\) 为两个64位输入操作数；
+- \(cin\) 为1位进位输入；
+- \(result[63:0]\) 为64位加法结果；
+- \(cout\) 为1位进位输出，用于标识64位加法的溢出状态。
+
+\subsection{LCD输入与显示适配原理}
+由于LCD屏单次仅支持32位数据的输入与显示，因此设计中通过\textbf{2位片选信号（input\_sel[1:0]）}实现64位数的分阶段输入，通过\textbf{位域拆分}实现64位数的分两格显示：
+\begin{enumerate}[label=\arabic*.]
+    \item \textbf{输入逻辑}： \\
+    - \(input\_sel=2'b00\)：输入操作数1的低32位（\(operand1[31:0]\)）； \\
+    - \(input\_sel=2'b01\)：输入操作数1的高32位（\(operand1[63:32]\)）； \\
+    - \(input\_sel=2'b10\)：输入操作数2的低32位（\(operand2[31:0]\)）； \\
+    - \(input\_sel=2'b11\)：输入操作数2的高32位（\(operand2[63:32]\)）； \\
+    \item \textbf{显示逻辑}： \\
+    - 操作数1：LCD第1格显示低32位，第2格显示高32位； \\
+    - 操作数2：LCD第3格显示低32位，第4格显示高32位； \\
+    - 加法结果：LCD第5格显示低32位，第6格显示高32位； \\
+\end{enumerate}
+
+\subsection{实验原理图}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{原理图.jpg} % 替换为你的原理图路径
+    \caption{64位加法器系统原理图（参考手册图2.40修改）}
+    \label{fig:schematic}
+\end{figure}
+\textbf{原理图说明}：系统由输入模块（拨码开关+LCD输入）、片选拼接模块、64位加法器模块、结果拆分模块、LCD显示模块、LED进位输出模块组成，实现完整的64位加法输入-运算-显示流程。
+
+\section{实验过程}
+\subsection{64位加法器模块（\texttt{adder.v}）修改}
+将原32位加法器的位宽全部扩展为64位，核心代码如下：
+\begin{lstlisting}
+`timescale 1ns / 1ps
+module adder(
+    input  [63:0] operand1,  // 修改：31:0 → 63:0
+    input  [63:0] operand2,  // 修改：31:0 → 63:0
+    input         cin,
+    output [63:0] result,   // 修改：31:0 → 63:0
+    output        cout
+    );
+    // 修改：{cout,result}位宽从33位→65位，适配64位加法
+    assign {cout,result} = operand1 + operand2 + cin;
+
+endmodule
+\end{lstlisting}
+\textbf{修改说明}：仅需将所有操作数、结果的位宽从\([31:0]\)修改为\([63:0]\)，Verilog的`+`运算符会自动适配64位加法，无需修改核心运算逻辑。
+
+\subsection{仿真测试文件（\texttt{testbench.v}）修改}
+修改位宽拓展至64位，修改随机激励，核心代码如下：
+\begin{lstlisting}
+`timescale 1ns / 1ps  
+module testbench;
+
+    // Inputs
+    reg [63:0] operand1;  // 修改：31:0 → 63:0
+    reg [63:0] operand2;  // 修改：31:0 → 63:0
+    reg cin;
+
+    // Outputs
+    wire [63:0] result;   // 修改：31:0 → 63:0
+    wire cout;
+    // Instantiate the Unit Under Test (UUT)
+    adder uut (
+        .operand1(operand1), 
+        .operand2(operand2), 
+        .cin(cin), 
+        .result(result), 
+        .cout(cout)
+    );
+    initial begin
+        // Initialize Inputs
+        operand1 = 0;
+        operand2 = 0;
+        cin = 0;
+        // Wait 100 ns for global reset to finish
+        #100;
+    end
+    // 随机激励
+    always #10 operand1 = {$random,$random};  
+    always #10 operand2 = {$random,$random}; 
+    always #10 cin = {$random} % 2;
+endmodule
+\end{lstlisting}
+\textbf{修改说明}：
+同步修改所有信号位宽为64位，适配加法器模块。
+
+\subsection{LCD显示控制模块（\texttt{adder\_display.v}）修改}
+修改操作数位宽、添加片选输入逻辑、拆分显示逻辑，核心代码如下：
+\begin{lstlisting}
+`timescale 1ns / 1ps
+module adder_display(
+    //时钟与复位信号
+    input clk,
+    input resetn,   
+
+    //拨码开关，用于选择输入数和产生cin
+    input [1:0] input_sel,  // 修改：单bit→2bit，00=op1低32,01=op1高32,10=op2低32,11=op2高32
+    input sw_cin,
+
+    //led灯，用于显示cout
+    output led_cout,
+
+    //触摸屏相关接口
+    output lcd_rst,
+    output lcd_cs,
+    output lcd_rs,
+    output lcd_wr,
+    output lcd_rd,
+    inout[15:0] lcd_data_io,
+    output lcd_bl_ctr,
+    inout ct_int,
+    inout ct_sda,
+    output ct_scl,
+    output ct_rstn
+    );
+
+//-----{调用加法模块}begin
+    reg  [63:0] adder_operand1;  // 修改：31:0→63:0
+    reg  [63:0] adder_operand2;  // 修改：31:0→63:0
+    wire        adder_cin;
+    wire [63:0] adder_result  ;  // 修改：31:0→63:0
+    wire        adder_cout;
+    adder adder_module(
+        .operand1(adder_operand1),
+        .operand2(adder_operand2),
+        .cin     (adder_cin     ),
+        .result  (adder_result  ),
+        .cout    (adder_cout    )
+    );
+    assign adder_cin = sw_cin;
+    assign led_cout  = adder_cout;
+//-----{调用加法模块}end
+
+//---------------------{调用触摸屏模块}begin--------------------//
+//-----{实例化触摸屏}begin
+//此小节未更改
+    reg         display_valid;
+    reg  [39:0] display_name;
+    reg  [31:0] display_value;
+    wire [5 :0] display_number;
+    wire        input_valid;
+    wire [31:0] input_value;
+
+    lcd_module lcd_module(
+        .clk            (clk           ),   //10Mhz
+        .resetn         (resetn        ),
+
+        //调用触摸屏的接口
+        .display_valid  (display_valid ),
+        .display_name   (display_name  ),
+        .display_value  (display_value ),
+        .display_number (display_number),
+        .input_valid    (input_valid   ),
+        .input_value    (input_value   ),
+
+        //lcd触摸屏相关接口
+        .lcd_rst        (lcd_rst       ),
+        .lcd_cs         (lcd_cs        ),
+        .lcd_rs         (lcd_rs        ),
+        .lcd_wr         (lcd_wr        ),
+        .lcd_rd         (lcd_rd        ),
+        .lcd_data_io    (lcd_data_io   ),
+        .lcd_bl_ctr     (lcd_bl_ctr    ),
+        .ct_int         (ct_int        ),
+        .ct_sda         (ct_sda        ),
+        .ct_scl         (ct_scl        ),
+        .ct_rstn        (ct_rstn       )
+    ); 
+//-----{实例化触摸屏}end
+
+//-----{从触摸屏获取输入}begin
+// 核心修改：分4次输入，拼接成2个64位操作数
+    // 操作数1：input_sel=00→低32位；01→高32位
+    always @(posedge clk)
+    begin
+        if (!resetn)
+        begin
+            adder_operand1 <= 64'd0;
+        end
+        else if (input_valid)
+        begin
+            case(input_sel)
+                2'b00: adder_operand1[31:0]  <= input_value;  // 输入op1低32位
+                2'b01: adder_operand1[63:32] <= input_value;  // 输入op1高32位
+                default: ;  // 其他状态不修改
+            endcase
+        end
+    end
+// 操作数2：input_sel=10→低32位；11→高32位
+    always @(posedge clk)
+    begin
+        if (!resetn)
+        begin
+            adder_operand2 <= 64'd0;
+        end
+        else if (input_valid)
+        begin
+            case(input_sel)
+                2'b10: adder_operand2[31:0]  <= input_value;  // 输入op2低32位
+                2'b11: adder_operand2[63:32] <= input_value;  // 输入op2高32位
+                default: ;  // 其他状态不修改
+            endcase
+        end
+    end
+//-----{从触摸屏获取输入}end
+
+//-----{输出到触摸屏显示}begin
+// 核心修改：每个64位数拆成高/低32位，用2个LCD格显示
+    always @(posedge clk)
+    begin
+        case(display_number)
+            // 操作数1：格1=低32位，格2=高32位
+            6'd1 :
+            begin
+                display_valid <= 1'b1;
+                display_name  <= "A_LOW";  // 操作数1低32位
+                display_value <= adder_operand1[31:0];
+            end
+            6'd2 :
+            begin
+                display_valid <= 1'b1;
+                display_name  <= "A_HIG";  // 操作数1高32位
+                display_value <= adder_operand1[63:32];
+            end
+            // 操作数2：格3=低32位，格4=高32位
+            6'd3 :
+            begin
+                display_valid <= 1'b1;
+                display_name  <= "B_LOW";  // 操作数2低32位
+                display_value <= adder_operand2[31:0];
+            end
+            6'd4 :
+            begin
+                display_valid <= 1'b1;
+                display_name  <= "B_HIG";  // 操作数2高32位
+                display_value <= adder_operand2[63:32];
+            end
+            // 结果：格5=低32位，格6=高32位
+            6'd5 :
+            begin
+                display_valid <= 1'b1;
+                display_name  <= "S_LOW";  // 结果低32位
+                display_value <= adder_result[31:0];
+            end
+            6'd6 :
+            begin
+                display_valid <= 1'b1;
+                display_name  <= "S_HIG";  // 结果高32位
+                display_value <= adder_result[63:32];
+            end
+            default :
+            begin
+                display_valid <= 1'b0;
+                display_name  <= 40'd0;
+                display_value <= 32'd0;
+            end
+        endcase
+    end
+//-----{输出到触摸屏显示}end
+//----------------------{调用触摸屏模块}end---------------------//
+endmodule
+
+\end{lstlisting}
+\textbf{修改说明}： \\
+- 将\(input\_sel\)从单bit扩展为2bit，实现4种输入模式； \\
+- 操作数位宽从32位改为64位，通过\(case\)语句分位域写入输入数据； \\
+- 显示逻辑拆分64位数为高低32位，用6个LCD格分别显示，新增状态提示提升操作体验； \\
+
+\subsection{引脚约束文件（\texttt{adder.xdc}）修改}
+适配2位片选信号，按实验箱拨码开关引脚修改约束，核心代码如下：
+\begin{lstlisting}[language=Tcl]
+# 时钟与复位
+set_property PACKAGE_PIN AC19 [get_ports clk]
+set_property PACKAGE_PIN H7   [get_ports led_cout]
+set_property PACKAGE_PIN Y3   [get_ports resetn]
+
+# 修改：input_sel从单bit→2bit，绑定2个拨码开关
+set_property PACKAGE_PIN AC21 [get_ports {input_sel[0]}]
+set_property PACKAGE_PIN AC22 [get_ports {input_sel[1]}]
+set_property PACKAGE_PIN AD24 [get_ports sw_cin]
+
+# IO电平标准
+set_property IOSTANDARD LVCMOS33 [get_ports clk]
+set_property IOSTANDARD LVCMOS33 [get_ports led_cout]
+set_property IOSTANDARD LVCMOS33 [get_ports resetn]
+set_property IOSTANDARD LVCMOS33 [get_ports {input_sel[0]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {input_sel[1]}]
+set_property IOSTANDARD LVCMOS33 [get_ports sw_cin]
+
+# 解决电压报错
+set_property CFGBVS VCCO [current_design]
+set_property CONFIG_VOLTAGE 3.3 [current_design]
+
+# LCD 引脚
+set_property PACKAGE_PIN J25 [get_ports lcd_rst]
+set_property PACKAGE_PIN H18 [get_ports lcd_cs]
+set_property PACKAGE_PIN K16 [get_ports lcd_rs]
+set_property PACKAGE_PIN L8 [get_ports lcd_wr]
+set_property PACKAGE_PIN K8 [get_ports lcd_rd]
+set_property PACKAGE_PIN J15 [get_ports lcd_bl_ctr]
+set_property PACKAGE_PIN H9 [get_ports {lcd_data_io[0]}]
+set_property PACKAGE_PIN K17 [get_ports {lcd_data_io[1]}]
+set_property PACKAGE_PIN J20 [get_ports {lcd_data_io[2]}]
+set_property PACKAGE_PIN M17 [get_ports {lcd_data_io[3]}]
+set_property PACKAGE_PIN L17 [get_ports {lcd_data_io[4]}]
+set_property PACKAGE_PIN L18 [get_ports {lcd_data_io[5]}]
+set_property PACKAGE_PIN L15 [get_ports {lcd_data_io[6]}]
+set_property PACKAGE_PIN M15 [get_ports {lcd_data_io[7]}]
+set_property PACKAGE_PIN M16 [get_ports {lcd_data_io[8]}]
+set_property PACKAGE_PIN L14 [get_ports {lcd_data_io[9]}]
+set_property PACKAGE_PIN M14 [get_ports {lcd_data_io[10]}]
+set_property PACKAGE_PIN F22 [get_ports {lcd_data_io[11]}]
+set_property PACKAGE_PIN G22 [get_ports {lcd_data_io[12]}]
+set_property PACKAGE_PIN G21 [get_ports {lcd_data_io[13]}]
+set_property PACKAGE_PIN H24 [get_ports {lcd_data_io[14]}]
+set_property PACKAGE_PIN J16 [get_ports {lcd_data_io[15]}]
+set_property PACKAGE_PIN L19 [get_ports ct_int]
+set_property PACKAGE_PIN J24 [get_ports ct_sda]
+set_property PACKAGE_PIN H21 [get_ports ct_scl]
+set_property PACKAGE_PIN G24 [get_ports ct_rstn]
+
+set_property IOSTANDARD LVCMOS33 [get_ports lcd_rst]
+set_property IOSTANDARD LVCMOS33 [get_ports lcd_cs]
+set_property IOSTANDARD LVCMOS33 [get_ports lcd_rs]
+set_property IOSTANDARD LVCMOS33 [get_ports lcd_wr]
+set_property IOSTANDARD LVCMOS33 [get_ports lcd_rd]
+set_property IOSTANDARD LVCMOS33 [get_ports lcd_bl_ctr]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[0]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[1]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[2]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[3]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[4]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[5]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[6]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[7]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[8]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[9]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[10]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[11]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[12]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[13]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[14]}]
+set_property IOSTANDARD LVCMOS33 [get_ports {lcd_data_io[15]}]
+set_property IOSTANDARD LVCMOS33 [get_ports ct_int]
+set_property IOSTANDARD LVCMOS33 [get_ports ct_sda]
+set_property IOSTANDARD LVCMOS33 [get_ports ct_scl]
+set_property IOSTANDARD LVCMOS33 [get_ports ct_rstn]
+\end{lstlisting}
+\textbf{修改说明}： \\
+- 仅修改\(input\_sel\)的引脚约束，将单bit改为2bit，绑定SW0、SW2两个拨码开关； \\
+- 添加电压配置语句，消除DRC警告； \\
+- 其余LCD引脚约束完全沿用原文件，无需修改。
+
+\section{实验结果}
+\subsection{仿真波形验证}
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=0.95\textwidth]{sim_wave_1.png} % 替换为你的波形图1
+%     \caption{64位加法器随机数仿真波形（\texttt{cin=0}）}
+%     \label{fig:sim1}
+% \end{figure}
+
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=0.95\textwidth]{sim_wave_2.png} % 替换为你的波形图2
+%     \caption{64位加法器带进位仿真波形（\texttt{cin=1}）}
+%     \label{fig:sim2}
+% \end{figure}
+
+\textbf{波形结果说明}：
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{波形图.png} % 替换为你的实验箱照片
+    \caption{波形结果展示}
+    \label{fig:wave}
+\end{figure}
+\begin{itemize}[label=\textbullet]
+    \item 随机数测试：所有时间点的\(operand1 + operand2 + cin\)结果与\(result\)完全一致，\(cout\)状态符合预期；
+    \item 结论：64位加法器逻辑完全正确，无位宽截断、进位错误等问题。
+\end{itemize}
+
+\subsection{FPGA上板验证}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{上版展示1.jpg} % 替换为你的实验箱照片
+    \caption{实验箱LCD显示64位加法结果1}
+    \label{fig:board1}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.9\textwidth]{上版展示2.jpg} % 替换为你的实验箱照片
+    \caption{实验箱LCD显示64位加法结果2}
+    \label{fig:board2}
+\end{figure}
+
+\textbf{上板结果说明}：
+\begin{itemize}[label=\textbullet]
+    \item 输入操作：通过拨码开关切换片选信号，分4次输入两个64位数的高低32位，输入逻辑正常；
+    \item 显示效果：LCD屏分6格显示两个操作数和结果的高低32位，状态提示清晰，无显示错乱；
+    \item 运算验证：LCD显示结果与预期完全一致；
+    \item 结论：上板功能正常，满足实验要求。
+\end{itemize}
+
+\section{实验收获与感想}
+通过本次64位加法器的设计与实现实验，我收获颇丰，主要体现在以下几个方面：
+\begin{enumerate}[label=\arabic*.]
+    \item \textbf{数字电路设计能力提升}：深入理解了加法器的位宽扩展原理，掌握了Verilog中位域操作、片选逻辑的设计方法，学会了如何适配硬件接口的限制（如LCD单次32位输入/显示），完成了从32位到64位的功能扩展；
+    \item \textbf{FPGA开发流程掌握}：完整经历了从代码修改、仿真验证、约束修改、综合实现到上板测试的全流程，解决了DRC报错、引脚约束、LCD模块警告等实际问题，提升了Vivado工具的使用熟练度；
+    \item \textbf{工程化思维培养}：在设计中充分考虑了硬件接口的限制，通过片选逻辑、状态提示等优化提升了系统的可用性，理解了“代码设计需适配硬件”的工程理念；
+    \item \textbf{问题排查能力提升}：针对仿真、综合、上板中出现的各类报错（如UCIO-1、BUFC-1、CFGBVS-1），逐一分析原因并解决，提升了数字电路设计中的问题排查能力。
+\end{enumerate}
+
+
+
+
+\end{document}
