@@ -5,6 +5,7 @@
 
 ---
 现已更新:
+- 创新实验
 - adder实验
 - multiply实验
 - regfile实验

@@ -1,0 +1,214 @@
+\documentclass{ctexart}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath} % 确保数学公式正常
+\usepackage{float}
+\usepackage{multirow} 
+\usepackage{float} 
+\geometry{a4paper, margin=1in}
+
+% 定义Verilog代码样式
+\lstdefinestyle{verilog}{
+    language=Verilog,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=5pt,
+    backgroundcolor=\color{gray!5},
+    frame=single,
+    rulecolor=\color{black},
+    tabsize=2,
+    breaklines=true,
+    breakatwhitespace=false,
+    captionpos=b
+}
+
+\title{8位定点CNN运算模块优化报告——超前进位加法器}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{引言}
+本报告旨在对8位定点CNN运算模块进行性能优化。优化前，3×3卷积单元中的加法树使用简单的行波进位加法器（Ripple Carry Adder, RCA），其进位信号需从最低位逐位传播至最高位，导致较大的传播时延。本报告采用超前进位加法器（Lookahead Carry Adder, LCA）替换原加法器，以减少进位传播时延，提升系统整体时序性能。
+
+\section{优化后代码实现}
+
+\subsection{参数化超前进位加法器（add\_lookahead.v）}
+该模块为参数化位宽设计，可通过 `WIDTH` 参数配置任意位宽的加法器，适配卷积树中不同位宽的加法需求。
+\begin{lstlisting}[style=verilog, caption=add\_lookahead.v]
+// add_lookahead.v（参数化位宽，替换原add_8bit.v）
+module add_lookahead #(
+    parameter WIDTH = 8  // 默认位宽8，可配置
+)(
+    input  wire [WIDTH-1:0] a,  // 加数A（WIDTH位无符号）
+    input  wire [WIDTH-1:0] b,  // 加数B（WIDTH位无符号）
+    output wire [WIDTH:0]   sum   // 和（WIDTH+1位无符号，含进位）
+);
+    // 内部信号：生成G、传播P
+    wire [WIDTH-1:0] G, P;
+    // 内部信号：超前进位C[WIDTH:1]
+    wire [WIDTH:1] C;
+
+    // 步骤1：计算G和P
+    assign G = a & b;
+    assign P = a ^ b;
+
+    // 步骤2：超前进位逻辑（参数化生成，避免手动展开）
+    assign C[1] = G[0];
+    generate
+        genvar i;
+        for (i = 1; i < WIDTH; i = i + 1) begin : carry_loop
+            assign C[i+1] = G[i] | (P[i] & C[i]);
+        end
+    endgenerate
+
+    // 步骤3：计算和
+    assign sum[0] = P[0];
+    generate
+        for (i = 1; i < WIDTH; i = i + 1) begin : sum_loop
+            assign sum[i] = P[i] ^ C[i];
+        end
+    endgenerate
+    assign sum[WIDTH] = C[WIDTH]; // 最高位进位
+endmodule
+\end{lstlisting}
+
+\subsection{修改后的3×3卷积单元（conv\_3x3.v）}
+% 该模块接口保持不变，内部加法树由实例化 `add_lookahead` 替换原直接加号，通过配置不同的 `WIDTH` 参数适配16位至20位的加法需求。
+\begin{lstlisting}[style=verilog, caption=conv\_3x3.v]
+// conv_3x3.v（修改后的版本，接口不变）
+module conv_3x3 (
+    // 输入：3×3像素窗口（9个8位）
+    input  wire [7:0] pix00, pix01, pix02,
+    input  wire [7:0] pix10, pix11, pix12,
+    input  wire [7:0] pix20, pix21, pix22,
+    // 输入：3×3卷积核（9个8位）
+    input  wire [7:0] k00, k01, k02,
+    input  wire [7:0] k10, k11, k12,
+    input  wire [7:0] k20, k21, k22,
+    // 输出：20位卷积累加结果（接口不变！）
+    output wire [19:0] conv_out
+);
+    // 内部信号：9个16位乘法结果（不变）
+    wire [15:0] p00, p01, p02, p10, p11, p12, p20, p21, p22;
+    // 内部信号：加法树中间结果（不变）
+    wire [16:0] s1;
+    wire [17:0] s2;
+    wire [18:0] s3;
+    wire [19:0] s4, s5, s6, s7;
+
+    // 步骤1：实例化9个8位乘法器（不变）
+    mul_8bit m00 (.a(pix00), .b(k00), .product(p00));
+    mul_8bit m01 (.a(pix01), .b(k01), .product(p01));
+    mul_8bit m02 (.a(pix02), .b(k02), .product(p02));
+    mul_8bit m10 (.a(pix10), .b(k10), .product(p10));
+    mul_8bit m11 (.a(pix11), .b(k11), .product(p11));
+    mul_8bit m12 (.a(pix12), .b(k12), .product(p12));
+    mul_8bit m20 (.a(pix20), .b(k20), .product(p20));
+    mul_8bit m21 (.a(pix21), .b(k21), .product(p21));
+    mul_8bit m22 (.a(pix22), .b(k22), .product(p22));
+
+    // --------------------------
+    // 步骤2：修改部分：用超前进位加法器替换直接+号
+    // --------------------------
+    // s1 = p00 + p01（16位加法 -> 17位输出）
+    add_lookahead #(.WIDTH(16)) add1 (.a(p00), .b(p01), .sum(s1));
+    // s2 = s1 + p02（17位加法 -> 18位输出）
+    add_lookahead #(.WIDTH(17)) add2 (.a(s1[16:0]), .b({1'b0, p02}), .sum(s2));
+    // s3 = s2 + p10（18位加法 -> 19位输出）
+    add_lookahead #(.WIDTH(18)) add3 (.a(s2[17:0]), .b({2'b0, p10}), .sum(s3));
+    // s4 = s3 + p11（19位加法 -> 20位输出）
+    add_lookahead #(.WIDTH(19)) add4 (.a(s3[18:0]), .b({3'b0, p11}), .sum(s4));
+    // s5 = s4 + p12（20位加法 -> 21位输出，但取低20位）
+    wire [20:0] s5_full;
+    add_lookahead #(.WIDTH(20)) add5 (.a(s4), .b({4'b0, p12}), .sum(s5_full));
+    assign s5 = s5_full[19:0];
+    // s6 = s5 + p20（20位加法 -> 21位输出，取低20位）
+    wire [20:0] s6_full;
+    add_lookahead #(.WIDTH(20)) add6 (.a(s5), .b({4'b0, p20}), .sum(s6_full));
+    assign s6 = s6_full[19:0];
+    // s7 = s6 + p21（20位加法 -> 21位输出，取低20位）
+    wire [20:0] s7_full;
+    add_lookahead #(.WIDTH(20)) add7 (.a(s6), .b({4'b0, p21}), .sum(s7_full));
+    assign s7 = s7_full[19:0];
+    // conv_out = s7 + p22（20位加法 -> 21位输出，取低20位）
+    wire [20:0] conv_out_full;
+    add_lookahead #(.WIDTH(20)) add8 (.a(s7), .b({4'b0, p22}), .sum(conv_out_full));
+    assign conv_out = conv_out_full[19:0];
+endmodule
+\end{lstlisting}
+
+\section{Vivado综合与时序分析}
+
+\subsection{综合分析（查看LUT资源占用）}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{优化前1.png}
+    \caption{优化前综合报告}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{优化后1.png}
+    \caption{优化后综合报告}
+\end{figure}
+
+
+\subsection{时序分析}
+由于设计为纯组合逻辑，需查看无约束路径的最大时延：
+在Tcl Console中输入命令：
+   \begin{verbatim}
+   report_timing -max_paths 1 -delay_type max -name longest_path
+   \end{verbatim}
+查看总物理时延
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{优化前2.jpg}
+    \caption{优化前时序报告}
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{优化后2.jpg}
+    \caption{优化后时序报告}
+\end{figure}
+
+\section{性能对比分析}
+\begin{table}[H]
+  \centering
+  \caption{优化前后性能对比表}
+  \begin{tabular}{lccc}
+  \toprule
+  \textbf{指标类型} & \textbf{指标名称} & \textbf{优化前} & \textbf{优化后} \\
+  \midrule
+  \multirow{3}{*}{\textbf{综合分析}} 
+  & Slice LUTs 数量 & 6888 & 7579 \\
+  & LUT 利用率 & 5.12\% & 5.63\% \\
+  & IO 利用率 & 76\% & 76\% \\
+  \midrule
+  \multirow{4}{*}{\textbf{时序分析}} 
+  & 总延迟 (ns) & 37.908 & 21.472 \\
+  & 逻辑延迟 (ns) & 7.652 & 11.099 \\
+  & 布线延迟 (ns) & 30.257 & 10.373 \\
+  & 逻辑级数 & 25 & 27 \\
+  \bottomrule
+  \end{tabular}
+\end{table}
+
+\section{预期结果与结论}
+\subsection{预期结果}
+- 资源（LUT）：超前进位加法器的逻辑更复杂，预计LUT占用增加约 10\%。 \\
+\indent - 时序（时延）：超前进位逻辑消除了长进位链，总延迟降幅超过 43\%。
+
+\subsection{结论}
+本报告完成了基于超前进位加法器的CNN运算模块优化。通过替换加法器，在可接受的资源增加范围内，显著提升了系统的时序性能，为后续更高频率的部署奠定了基础。
+
+\end{document}

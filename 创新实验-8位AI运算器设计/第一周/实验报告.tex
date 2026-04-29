@@ -1,0 +1,202 @@
+\documentclass{ctexart}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+
+% 定义Verilog代码样式
+\lstdefinestyle{verilog}{
+    language=Verilog,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=5pt,
+    backgroundcolor=\color{gray!5},
+    frame=single,
+    rulecolor=\color{black},
+    tabsize=2,
+    breaklines=true,
+    breakatwhitespace=false,
+    captionpos=b
+}
+
+\title{8位定点CNN基本运算模块设计与功能仿真报告}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{引言}
+本报告旨在完成面向边缘端AI的8位定点CNN基本运算模块设计，包括8位无符号乘法器、8位加法器、ReLU激活模块和除以4除法器，并通过功能仿真验证各模块的正确性，为后续卷积-激活-池化全链路设计奠定基础。
+
+\section{各模块设计与实现}
+
+\subsection{8位无符号乘法器（卷积乘算）}
+\subsubsection{功能说明}
+该模块用于卷积运算中的像素值与卷积核权重相乘，输入为两个8位无符号数，输出为16位无符号乘积，以防止乘法溢出。
+
+\subsubsection{Verilog代码实现}
+\begin{lstlisting}[style=verilog, caption=mul\_8bit.v]
+// mul_8bit.v
+module mul_8bit (
+    input  wire [7:0] a,      // 乘数A（8位无符号）
+    input  wire [7:0] b,      // 乘数B（8位无符号）
+    output wire [15:0] product // 乘积（16位无符号）
+);
+    assign product = a * b;    // 直接使用Verilog乘法运算符
+endmodule
+\end{lstlisting}
+
+\subsection{8位加法器（卷积累加、池化求和）}
+\subsubsection{功能说明}
+该模块用于卷积结果的累加和池化运算中的求和，输入为两个8位无符号数，输出为9位无符号和，通过扩展位宽防止加法溢出。
+
+\subsubsection{Verilog代码实现}
+\begin{lstlisting}[style=verilog, caption=add\_8bit.v]
+// add_8bit.v
+module add_8bit (
+    input  wire [7:0] a,      // 加数A（8位无符号）
+    input  wire [7:0] b,      // 加数B（8位无符号）
+    output wire [8:0] sum      // 和（9位无符号，防止溢出）
+);
+    assign sum = a + b;        // 直接使用Verilog加法运算符
+endmodule
+\end{lstlisting}
+
+\subsection{ReLU激活模块（无符号数直接输出）}
+\subsubsection{功能说明}
+该模块用于ReLU激活函数，由于输入为8位无符号数（范围0-255），本身非负，因此无需进行负数判断，直接将输入赋值给输出即可。
+
+\subsubsection{Verilog代码实现}
+\begin{lstlisting}[style=verilog, caption=relu.v]
+// relu.v
+module relu (
+    input  wire [7:0] in,      // 输入（8位无符号）
+    output wire [7:0] out      // 输出（等于输入，因无符号数非负）
+);
+    assign out = in;            // 无符号数无需判断，直接输出
+endmodule
+\end{lstlisting}
+
+\subsection{除以4除法器（池化平均）}
+\subsubsection{功能说明}
+该模块用于2×2平均池化运算，输入为10位无符号数（兼容4个8位数累加结果，最大值为4×255=1020），通过无符号数右移2位实现除以4取整，输出为8位无符号结果。
+
+\subsubsection{Verilog代码实现}
+\begin{lstlisting}[style=verilog, caption=div4.v]
+// div4.v
+module div4 (
+    input  wire [9:0] in,      // 输入（10位，兼容4个8位数累加结果）
+    output wire [7:0] out      // 输出（8位，除以4后结果）
+);
+    assign out = in >> 2;       // 无符号数右移2位，等价于除以4取整
+endmodule
+\end{lstlisting}
+
+\section{功能仿真验证}
+
+\subsection{仿真激励代码}
+编写Testbench对四个模块进行统一测试，覆盖典型值和边界值（如0、255等）。
+
+\begin{lstlisting}[style=verilog, caption=tb\_top.v]
+// tb_top.v
+`timescale 1ns/1ps  // 时间单位/精度
+
+module tb_top;
+    // 乘法器测试信号
+    reg  [7:0] mul_a, mul_b;
+    wire [15:0] mul_product;
+
+    // 加法器测试信号
+    reg  [7:0] add_a, add_b;
+    wire [8:0] add_sum;
+
+    // ReLU测试信号
+    reg  [7:0] relu_in;
+    wire [7:0] relu_out;
+
+    // 除法器测试信号
+    reg  [9:0] div4_in;
+    wire [7:0] div4_out;
+
+    // 实例化所有模块
+    mul_8bit u_mul (
+        .a(mul_a),
+        .b(mul_b),
+        .product(mul_product)
+    );
+
+    add_8bit u_add (
+        .a(add_a),
+        .b(add_b),
+        .sum(add_sum)
+    );
+
+    relu u_relu (
+        .in(relu_in),
+        .out(relu_out)
+    );
+
+    div4 u_div4 (
+        .in(div4_in),
+        .out(div4_out)
+    );
+
+    // 测试激励
+    initial begin
+        // 初始化输入
+        mul_a = 0; mul_b = 0;
+        add_a = 0; add_b = 0;
+        relu_in = 0;
+        div4_in = 0;
+        #10;
+
+        // --------------------------
+        // 测试1：乘法器
+        // --------------------------
+        mul_a = 8'd2;  mul_b = 8'd3;  #10;  // 2*3=6
+        mul_a = 8'd255; mul_b = 8'd255; #10; // 255*255=65025
+
+        // --------------------------
+        // 测试2：加法器
+        // --------------------------
+        add_a = 8'd100; add_b = 8'd200; #10; // 100+200=300
+        add_a = 8'd255; add_b = 8'd255; #10; // 255+255=510
+
+        // --------------------------
+        // 测试3：ReLU
+        // --------------------------
+        relu_in = 8'd123; #10; // 输入123，输出123
+        relu_in = 8'd0;   #10; // 输入0，输出0
+
+        // --------------------------
+        // 测试4：除以4
+        // --------------------------
+        div4_in = 10'd1020; #10; // 1020/4=255
+        div4_in = 10'd100;  #10; // 100/4=25
+
+        #10;
+        $finish; // 结束仿真
+    end
+endmodule
+\end{lstlisting}
+\clearpage
+
+
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=\textwidth]{任务1波形图.png}
+    \caption{功能仿真波形图}
+    \label{fig:sim_wave}
+\end{figure}
+
+\section{结论}
+本报告完成了8位无符号乘法器、8位加法器、ReLU激活模块和除以4除法器的设计与实现，并通过功能仿真验证了各模块的逻辑正确性。仿真结果表明，所有模块均能正常工作，覆盖了典型值和边界值测试，可用于后续卷积-激活-池化全链路的设计与集成。
+
+\end{document}

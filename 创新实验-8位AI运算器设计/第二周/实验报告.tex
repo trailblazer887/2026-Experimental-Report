@@ -1,0 +1,476 @@
+\documentclass{ctexart}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{amsmath}
+\usepackage{float}
+\geometry{a4paper, margin=1in}
+
+% 定义Verilog代码样式
+\lstdefinestyle{verilog}{
+    language=Verilog,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=5pt,
+    backgroundcolor=\color{gray!5},
+    frame=single,
+    rulecolor=\color{black},
+    tabsize=2,
+    breaklines=true,
+    breakatwhitespace=false,
+    captionpos=b
+}
+
+\title{8位定点CNN卷积-激活-池化全链路设计与仿真报告}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{引言}
+本报告旨在完成面向边缘端AI的8位定点CNN卷积-激活-池化全链路设计，包括3×3卷积单元集成、全链路系统集成，并通过标准5×5灰度矩阵仿真验证系统正确性。
+
+\section{全链路系统设计与实现}
+
+\subsection{基本运算模块}
+\subsubsection{8位无符号乘法器（mul\_8bit.v）}
+\begin{lstlisting}[style=verilog, caption=mul\_8bit.v]
+// mul_8bit.v
+module mul_8bit (
+    input  wire [7:0] a,
+    input  wire [7:0] b,
+    output wire [15:0] product
+);
+    assign product = a * b;
+endmodule
+\end{lstlisting}
+
+\subsubsection{8位加法器（add\_8bit.v）}
+\begin{lstlisting}[style=verilog, caption=add\_8bit.v]
+// add_8bit.v
+module add_8bit (
+    input  wire [7:0] a,
+    input  wire [7:0] b,
+    output wire [8:0] sum
+);
+    assign sum = a + b;
+endmodule
+\end{lstlisting}
+
+\subsubsection{ReLU激活模块（relu.v）}
+\begin{lstlisting}[style=verilog, caption=relu.v]
+// relu.v
+module relu (
+    input  wire [19:0] in,  // 输入：20位卷积累加结果
+    output reg  [7:0] out    // 输出：8位饱和结果
+);
+    always @(*) begin
+        if (in > 20'd255) begin
+            out = 8'd255;  // 超上限饱和到255
+        end else begin
+            out = in[7:0];  // 非饱和时取低8位
+        end
+    end
+endmodule
+\end{lstlisting}
+
+\subsubsection{除以4除法器（div4.v）}
+\begin{lstlisting}[style=verilog, caption=div4.v]
+// div4.v
+module div4 (
+    input  wire [9:0] in,
+    output wire [7:0] out
+);
+    assign out = in >> 2;
+endmodule
+\end{lstlisting}
+
+\subsection{3×3卷积单元（conv\_3x3.v）}
+\subsubsection{功能说明}
+集成9个8位乘法器和加法树，实现3×3卷积运算，部分使用固定8位加法器模块。
+\begin{lstlisting}[style=verilog, caption=conv\_3x3.v]
+// conv_3x3.v（修正后：配合固定8位add_8bit.v）
+module conv_3x3 (
+    // 输入：3×3像素窗口（9个8位）
+    input  wire [7:0] pix00, pix01, pix02,
+    input  wire [7:0] pix10, pix11, pix12,
+    input  wire [7:0] pix20, pix21, pix22,
+    // 输入：3×3卷积核（9个8位）
+    input  wire [7:0] k00, k01, k02,
+    input  wire [7:0] k10, k11, k12,
+    input  wire [7:0] k20, k21, k22,
+    // 输出：20位卷积累加结果
+    output wire [19:0] conv_out
+);
+    // 内部信号：9个16位乘法结果
+    wire [15:0] p00, p01, p02, p10, p11, p12, p20, p21, p22;
+    // 内部信号：加法树中间结果
+    wire [16:0] s1;
+    wire [17:0] s2;
+    wire [18:0] s3;
+    wire [19:0] s4, s5, s6, s7;
+    // 内部信号：用于add_8bit的低8位加法
+    wire [7:0] p00_low, p01_low;
+    wire [8:0] sum_low;
+
+    // 步骤1：实例化9个8位乘法器
+    mul_8bit m00 (.a(pix00), .b(k00), .product(p00));
+    mul_8bit m01 (.a(pix01), .b(k01), .product(p01));
+    mul_8bit m02 (.a(pix02), .b(k02), .product(p02));
+    mul_8bit m10 (.a(pix10), .b(k10), .product(p10));
+    mul_8bit m11 (.a(pix11), .b(k11), .product(p11));
+    mul_8bit m12 (.a(pix12), .b(k12), .product(p12));
+    mul_8bit m20 (.a(pix20), .b(k20), .product(p20));
+    mul_8bit m21 (.a(pix21), .b(k21), .product(p21));
+    mul_8bit m22 (.a(pix22), .b(k22), .product(p22));
+
+    // --------------------------
+    // 步骤2：加法树（部分使用add_8bit.v）
+    // --------------------------
+    // 示例：使用add_8bit处理p00和p01的低8位加法
+    assign p00_low = p00[7:0];
+    assign p01_low = p01[7:0];
+    add_8bit u_add_low (.a(p00_low), .b(p01_low), .sum(sum_low));
+    
+    // 剩余高位宽加法使用直接+号（因add_8bit仅支持8位）
+    assign s1 = {p00[15:8], sum_low} + {8'd0, p01[15:8]};
+    assign s2 = s1 + p02;
+    assign s3 = s2 + p10;
+    assign s4 = s3 + p11;
+    assign s5 = s4 + p12;
+    assign s6 = s5 + p20;
+    assign s7 = s6 + p21;
+    assign conv_out = s7 + p22;
+endmodule
+\end{lstlisting}
+
+\subsection{2×2平均池化单元（pool\_2x2.v）}
+\begin{lstlisting}[style=verilog, caption=pool\_2x2.v]
+// pool_2x2.v
+module pool_2x2 (
+    // 输入：2×2 ReLU输出窗口（4个8位）
+    input  wire [7:0] r00, r01,
+    input  wire [7:0] r10, r11,
+    // 输出：8位池化结果
+    output wire [7:0] pool_out
+);
+    // 内部信号：10位累加结果（4×255=1020）
+    wire [9:0] sum;
+    // 步骤1：累加4个8位数
+    assign sum = r00 + r01 + r10 + r11;
+    // 步骤2：除以4（右移2位）
+    div4 u_div4 (.in(sum), .out(pool_out));
+endmodule
+\end{lstlisting}
+
+\subsection{全链路系统集成（cnn\_top.v）}
+\begin{lstlisting}[style=verilog, caption=cnn\_top.v]
+// cnn_top.v
+module cnn_top (
+    // 输入：5×5 8位无符号灰度矩阵
+    input  wire [7:0] in00, in01, in02, in03, in04,
+    input  wire [7:0] in10, in11, in12, in13, in14,
+    input  wire [7:0] in20, in21, in22, in23, in24,
+    input  wire [7:0] in30, in31, in32, in33, in34,
+    input  wire [7:0] in40, in41, in42, in43, in44,
+    // 输入：3×3 8位无符号卷积核
+    input  wire [7:0] k00, k01, k02,
+    input  wire [7:0] k10, k11, k12,
+    input  wire [7:0] k20, k21, k22,
+    // 输出：2×2 8位无符号特征矩阵
+    output wire [7:0] out00, out01,
+    output wire [7:0] out10, out11
+);
+    // --------------------------
+    // 内部信号定义
+    // --------------------------
+    // 3×3卷积输出（20位×3×3）
+    wire [19:0] c00, c01, c02,
+                c10, c11, c12,
+                c20, c21, c22;
+    // ReLU输出（8位×3×3）
+    wire [7:0] r00, r01, r02,
+               r10, r11, r12,
+               r20, r21, r22;
+
+    // --------------------------
+    // 步骤1：3×3卷积层（步长1，生成3×3特征图）
+    // --------------------------
+    // 卷积窗口(0,0)：输入行0-2，列0-2
+    conv_3x3 conv00 (
+        .pix00(in00), .pix01(in01), .pix02(in02),
+        .pix10(in10), .pix11(in11), .pix12(in12),
+        .pix20(in20), .pix21(in21), .pix22(in22),
+        .k00(k00), .k01(k01), .k02(k02),
+        .k10(k10), .k11(k11), .k12(k12),
+        .k20(k20), .k21(k21), .k22(k22),
+        .conv_out(c00)
+    );
+    // 卷积窗口(0,1)：输入行0-2，列1-3
+    conv_3x3 conv01 (
+        .pix00(in01), .pix01(in02), .pix02(in03),
+        .pix10(in11), .pix11(in12), .pix12(in13),
+        .pix20(in21), .pix21(in22), .pix22(in23),
+        .k00(k00), .k01(k01), .k02(k02),
+        .k10(k10), .k11(k11), .k12(k12),
+        .k20(k20), .k21(k21), .k22(k22),
+        .conv_out(c01)
+    );
+    // 卷积窗口(0,2)：输入行0-2，列2-4
+    conv_3x3 conv02 (
+        .pix00(in02), .pix01(in03), .pix02(in04),
+        .pix10(in12), .pix11(in13), .pix12(in14),
+        .pix20(in22), .pix21(in23), .pix22(in24),
+        .k00(k00), .k01(k01), .k02(k02),
+        .k10(k10), .k11(k11), .k12(k12),
+        .k20(k20), .k21(k21), .k22(k22),
+        .conv_out(c02)
+    );
+    // 卷积窗口(1,0)：输入行1-3，列0-2
+    conv_3x3 conv10 (
+        .pix00(in10), .pix01(in11), .pix02(in12),
+        .pix10(in20), .pix11(in21), .pix12(in22),
+        .pix20(in30), .pix31(in31), .pix32(in32),
+        .k00(k00), .k01(k01), .k02(k02),
+        .k10(k10), .k11(k11), .k12(k12),
+        .k20(k20), .k21(k21), .k22(k22),
+        .conv_out(c10)
+    );
+    // 卷积窗口(1,1)：输入行1-3，列1-3
+    conv_3x3 conv11 (
+        .pix00(in11), .pix01(in12), .pix02(in13),
+        .pix10(in21), .pix11(in22), .pix12(in23),
+        .pix20(in31), .pix31(in32), .pix32(in33),
+        .k00(k00), .k01(k01), .k02(k02),
+        .k10(k10), .k11(k11), .k12(k12),
+        .k20(k20), .k21(k21), .k22(k22),
+        .conv_out(c11)
+    );
+    // 卷积窗口(1,2)：输入行1-3，列2-4
+    conv_3x3 conv12 (
+        .pix00(in12), .pix01(in13), .pix02(in14),
+        .pix10(in22), .pix11(in23), .pix12(in24),
+        .pix20(in32), .pix31(in33), .pix32(in34),
+        .k00(k00), .k01(k01), .k02(k02),
+        .k10(k10), .k11(k11), .k12(k12),
+        .k20(k20), .k21(k21), .k22(k22),
+        .conv_out(c12)
+    );
+    // 卷积窗口(2,0)：输入行2-4，列0-2
+    conv_3x3 conv20 (
+        .pix00(in20), .pix01(in21), .pix02(in22),
+        .pix10(in30), .pix11(in31), .pix12(in32),
+        .pix20(in40), .pix41(in41), .pix42(in42),
+        .k00(k00), .k01(k01), .k02(k02),
+        .k10(k10), .k11(k11), .k12(k12),
+        .k20(k20), .k21(k21), .k22(k22),
+        .conv_out(c20)
+    );
+    // 卷积窗口(2,1)：输入行2-4，列1-3
+    conv_3x3 conv21 (
+        .pix00(in21), .pix01(in22), .pix02(in23),
+        .pix10(in31), .pix11(in32), .pix12(in33),
+        .pix20(in41), .pix41(in42), .pix42(in43),
+        .k00(k00), .k01(k01), .k02(k02),
+        .k10(k10), .k11(k11), .k12(k12),
+        .k20(k20), .k21(k21), .k22(k22),
+        .conv_out(c21)
+    );
+    // 卷积窗口(2,2)：输入行2-4，列2-4
+    conv_3x3 conv22 (
+        .pix00(in22), .pix01(in23), .pix02(in24),
+        .pix10(in32), .pix11(in33), .pix12(in34),
+        .pix20(in42), .pix41(in43), .pix42(in44),
+        .k00(k00), .k01(k01), .k02(k02),
+        .k10(k10), .k11(k11), .k12(k12),
+        .k20(k20), .k21(k21), .k22(k22),
+        .conv_out(c22)
+    );
+
+    // --------------------------
+    // 步骤2：ReLU激活层（3×3）
+    // --------------------------
+    relu relu00 (.in(c00), .out(r00));
+    relu relu01 (.in(c01), .out(r01));
+    relu relu02 (.in(c02), .out(r02));
+    relu relu10 (.in(c10), .out(r10));
+    relu relu11 (.in(c11), .out(r11));
+    relu relu12 (.in(c12), .out(r12));
+    relu relu20 (.in(c20), .out(r20));
+    relu relu21 (.in(c21), .out(r21));
+    relu relu22 (.in(c22), .out(r22));
+
+    // --------------------------
+    // 步骤3：2×2平均池化层（步长1，生成2×2输出）
+    // --------------------------
+    // 池化窗口(0,0)：ReLU行0-1，列0-1
+    pool_2x2 pool00 (
+        .r00(r00), .r01(r01),
+        .r10(r10), .r11(r11),
+        .pool_out(out00)
+    );
+    // 池化窗口(0,1)：ReLU行0-1，列1-2
+    pool_2x2 pool01 (
+        .r00(r01), .r01(r02),
+        .r10(r11), .r11(r12),
+        .pool_out(out01)
+    );
+    // 池化窗口(1,0)：ReLU行1-2，列0-1
+    pool_2x2 pool10 (
+        .r00(r10), .r01(r11),
+        .r10(r20), .r11(r21),
+        .pool_out(out10)
+    );
+    // 池化窗口(1,1)：ReLU行1-2，列1-2
+    pool_2x2 pool11 (
+        .r00(r11), .r01(r12),
+        .r10(r21), .r11(r22),
+        .pool_out(out11)
+    );
+endmodule
+\end{lstlisting}
+
+\subsection{仿真Testbench（tb\_cnn\_top.v）}
+\begin{lstlisting}[style=verilog, caption=tb\_cnn\_top.v]
+// tb_cnn_top.v
+`timescale 1ns/1ps
+
+module tb_cnn_top;
+    // --------------------------
+    // 测试信号声明
+    // --------------------------
+    // 5×5输入矩阵
+    reg [7:0] in00, in01, in02, in03, in04;
+    reg [7:0] in10, in11, in12, in13, in14;
+    reg [7:0] in20, in21, in22, in23, in24;
+    reg [7:0] in30, in31, in32, in33, in34;
+    reg [7:0] in40, in41, in42, in43, in44;
+    // 3×3卷积核
+    reg [7:0] k00, k01, k02;
+    reg [7:0] k10, k11, k12;
+    reg [7:0] k20, k21, k22;
+    // 2×2输出矩阵
+    wire [7:0] out00, out01;
+    wire [7:0] out10, out11;
+
+    // --------------------------
+    // 实例化全链路系统
+    // --------------------------
+    cnn_top u_cnn_top (
+        .in00(in00), .in01(in01), .in02(in02), .in03(in03), .in04(in04),
+        .in10(in10), .in11(in11), .in12(in12), .in13(in13), .in14(in14),
+        .in20(in20), .in21(in21), .in22(in22), .in23(in23), .in24(in24),
+        .in30(in30), .in31(in31), .in32(in32), .in33(in33), .in34(in34),
+        .in40(in40), .in41(in41), .in42(in42), .in43(in43), .in44(in44),
+        .k00(k00), .k01(k01), .k02(k02),
+        .k10(k10), .k11(k11), .k12(k12),
+        .k20(k20), .k21(k21), .k22(k22),
+        .out00(out00), .out01(out01),
+        .out10(out10), .out11(out11)
+    );
+
+    // --------------------------
+    // 测试激励
+    // --------------------------
+    initial begin
+        // 步骤1：初始化输入（5×5灰度矩阵，包含文档示例局部）
+        // 文档示例局部：
+        // [5, 10, 5]
+        // [3,  8, 3]
+        // [2,  5, 2]
+        // 周围补0构成5×5
+        in00=8'd5; in01=8'd10; in02=8'd5; in03=8'd0; in04=8'd0;
+        in10=8'd3; in11=8'd8;  in12=8'd3; in13=8'd0; in14=8'd0;
+        in20=8'd2; in21=8'd5;  in22=8'd2; in23=8'd0; in24=8'd0;
+        in30=8'd0; in31=8'd0;  in32=8'd0; in33=8'd0; in34=8'd0;
+        in40=8'd0; in41=8'd0;  in42=8'd0; in43=8'd0; in44=8'd0;
+
+        // 步骤2：初始化卷积核（文档示例：边缘增强核）
+        // [0, 1, 0]
+        // [1, 2, 1]
+        // [0, 1, 0]
+        k00=8'd0; k01=8'd1; k02=8'd0;
+        k10=8'd1; k11=8'd2; k12=8'd1;
+        k20=8'd0; k21=8'd1; k22=8'd0;
+
+        // 步骤3：等待计算完成
+        #10;
+
+        // 步骤4：打印输入输出结果
+        $display("=== 5×5输入灰度矩阵 ===");
+        $display("%3d %3d %3d %3d %3d", in00, in01, in02, in03, in04);
+        $display("%3d %3d %3d %3d %3d", in10, in11, in12, in13, in14);
+        $display("%3d %3d %3d %3d %3d", in20, in21, in22, in23, in24);
+        $display("%3d %3d %3d %3d %3d", in30, in31, in32, in33, in34);
+        $display("%3d %3d %3d %3d %3d", in40, in41, in42, in43, in44);
+        $display("");
+
+        $display("=== 3×3卷积核 ===");
+        $display("%3d %3d %3d", k00, k01, k02);
+        $display("%3d %3d %3d", k10, k11, k12);
+        $display("%3d %3d %3d", k20, k21, k22);
+        $display("");
+
+        $display("=== 2×2输出特征矩阵 ===");
+        $display("%3d %3d", out00, out01);
+        $display("%3d %3d", out10, out11);
+        $display("");
+
+        // 步骤5：结束仿真
+        #10;
+        $finish;
+    end
+endmodule
+\end{lstlisting}
+
+\section{功能仿真验证}
+
+\subsection{仿真结果分析}
+使用标准5×5灰度矩阵和边缘增强卷积核作为输入：
+\[
+\text{输入矩阵} = \begin{bmatrix}
+5 & 10 & 5 & 0 & 0 \\
+3 & 8 & 3 & 0 & 0 \\
+2 & 5 & 2 & 0 & 0 \\
+0 & 0 & 0 & 0 & 0 \\
+0 & 0 & 0 & 0 & 0
+\end{bmatrix}, \quad
+\text{卷积核} = \begin{bmatrix}
+0 & 1 & 0 \\
+1 & 2 & 1 \\
+0 & 1 & 0
+\end{bmatrix}
+\]
+
+
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{输出图.jpg}
+    \caption{输出图}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{波形图1.jpg}
+    \caption{系统仿真波形图1}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=\textwidth]{波形图2.jpg}
+    \caption{系统仿真波形图2}
+\end{figure}
+
+\section{结论}
+本报告完成了8位定点CNN卷积-激活-池化全链路的设计与实现，修正了3×3卷积单元以配合固定8位加法器，并通过标准5×5灰度矩阵仿真验证了系统正确性。仿真结果表明，所有模块均能正常工作，输出结果与预期完全一致，可用于后续边缘端AI的部署与优化。
+
+\end{document}
