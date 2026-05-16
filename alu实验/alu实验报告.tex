@@ -1,0 +1,308 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage{ctex}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{float}
+
+% 页面设置
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+
+% 代码高亮设置
+\lstset{
+    language=Verilog,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=5pt,
+    backgroundcolor=\color{white},
+    showspaces=false,
+    showstringspaces=false,
+    frame=single,
+    tabsize=4,
+    breaklines=true,
+    breakatwhitespace=false
+}
+
+\title{ALU实验功能改进报告}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+
+% \section{实验目的}
+% 1. 深入理解ALU的工作原理和结构组成
+% 2. 掌握Verilog HDL设计数字电路的方法
+% 3. 对比独热码与二进制编码在控制信号设计中的优缺点
+% 4. 学会在原有设计基础上进行功能扩展和优化
+% 5. 掌握FPGA开发流程，包括代码编写、仿真验证和上板调试
+
+\section{实验原理}
+\subsection{ALU基本原理}
+算术逻辑单元(ALU)是中央处理器的核心组成部分，负责执行所有的算术运算和逻辑运算。本实验中的原始ALU设计支持12种基本操作，包括加法、减法、比较、移位和逻辑运算等。
+
+\subsection{编码方式改进原理}
+原始设计采用12位独热码作为控制信号，每个操作对应一位控制信号。这种方式的优点是解码简单，但缺点是控制信号位数过多，浪费硬件资源。
+
+4位二进制编码可以表示16种不同的状态，完全可以覆盖原有的12种操作，并且还有4个冗余状态可以用于扩展新功能。本实验将控制信号从12位减少到4位，通过组合逻辑解码产生各个操作的使能信号。
+
+\subsection{新增操作}
+1. 有符号比较大于置位 \\
+\indent2. 按位同或 \\
+\indent3. 低位加载
+
+% 实验原理图（注释掉以防编译错误）
+% \begin{figure}[H]
+%     \centering
+%     \includegraphics[width=0.9\textwidth]{fig5_3.png}
+%     \caption{改进后的ALU实验原理图（参考实验指导书图5.3）}
+%     \label{fig:alu_schematic}
+% \end{figure}
+
+\section{实验内容与修改}
+% 本次实验主要对三个文件进行了修改：alu.v（核心ALU模块）、alu_display.v（显示与输入模块）和约束文件(.xdc)。
+
+\subsection{操作码编码表设计}
+保留原有12种操作的功能不变，重新分配4位二进制操作码，并新增三种操作，编码表如下：
+
+\begin{table}[H]
+\centering
+\caption{改进后的ALU操作码编码表}
+\begin{tabular}{cccccc}
+\toprule
+4位二进制码 & AC22(bit3) & AC23(bit2) & AB6(bit1) & W6(bit0) & ALU操作 \\
+\midrule
+0000 & 0 & 0 & 0 & 0 & 无操作 \\
+0001 & 0 & 0 & 0 & 1 & 加法 \\
+0010 & 0 & 0 & 1 & 0 & 减法 \\
+0011 & 0 & 0 & 1 & 1 & 有符号比较，小于置位 \\
+0100 & 0 & 1 & 0 & 0 & 无符号比较，小于置位 \\
+0101 & 0 & 1 & 0 & 1 & 按位与 \\
+0110 & 0 & 1 & 1 & 0 & 按位或非 \\
+0111 & 0 & 1 & 1 & 1 & 按位或 \\
+1000 & 1 & 0 & 0 & 0 & 按位异或 \\
+1001 & 1 & 0 & 0 & 1 & 逻辑左移 \\
+1010 & 1 & 0 & 1 & 0 & 逻辑右移 \\
+1011 & 1 & 0 & 1 & 1 & 算术右移 \\
+1100 & 1 & 1 & 0 & 0 & 高位加载 \\
+1101 & 1 & 1 & 0 & 1 & 有符号比较，大于置位(新增) \\
+1110 & 1 & 1 & 1 & 0 & 按位同或(新增) \\
+1111 & 1 & 1 & 1 & 1 & 低位加载(新增) \\
+\bottomrule
+\end{tabular}
+\label{tab:opcode}
+\end{table}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{原理图.jpg}
+    \caption{原理图}
+
+\end{figure}
+
+\subsection{alu.v模块修改}
+这是本次实验的核心修改文件，主要修改内容如下：
+
+1. 模块端口修改：将12位独热码控制信号改为4位二进制控制信号
+\begin{lstlisting}
+// 修改前
+module alu(
+    input  [11:0] alu_control,  // ALU控制信号
+    input  [31:0] alu_src1,     // ALU操作数1,为补码
+    input  [31:0] alu_src2,     // ALU操作数2，为补码
+    output [31:0] alu_result    // ALU结果
+    );
+
+// 修改后
+module alu(
+    input  [3:0] alu_control,   // ALU控制信号(4位二进制)
+    input  [31:0] alu_src1,     // ALU操作数1,为补码
+    input  [31:0] alu_src2,     // ALU操作数2，为补码
+    output [31:0] alu_result    // ALU结果
+    );
+\end{lstlisting}
+
+2. 控制信号解码修改：移除独热码解码，添加新操作信号并实现4位二进制解码
+\begin{lstlisting}
+// 新增三个操作信号
+wire alu_sgt;   //有符号比较，大于置位(新增)
+wire alu_xnor;  //按位同或(新增)
+wire alu_lli;   //低位加载(新增)
+
+// 4位二进制控制信号解码
+assign alu_add  = (alu_control == 4'b0001);
+assign alu_sub  = (alu_control == 4'b0010);
+assign alu_slt  = (alu_control == 4'b0011);
+assign alu_sltu = (alu_control == 4'b0100);
+assign alu_and  = (alu_control == 4'b0101);
+assign alu_nor  = (alu_control == 4'b0110);
+assign alu_or   = (alu_control == 4'b0111);
+assign alu_xor  = (alu_control == 4'b1000);
+assign alu_sll  = (alu_control == 4'b1001);
+assign alu_srl  = (alu_control == 4'b1010);
+assign alu_sra  = (alu_control == 4'b1011);
+assign alu_lui  = (alu_control == 4'b1100);
+assign alu_sgt  = (alu_control == 4'b1101); // 新增
+assign alu_xnor = (alu_control == 4'b1110); // 新增
+assign alu_lli  = (alu_control == 4'b1111); // 新增
+\end{lstlisting}
+
+3. 新增操作实现：添加三个新操作的结果计算逻辑
+\begin{lstlisting}
+// 按位同或结果为异或结果按位取反
+assign xnor_result = ~xor_result;             
+// 低位加载：立即数放在低半字节
+assign lli_result = {16'd0, alu_src2[15:0]};  
+
+// 有符号大于置位结果
+assign sgt_result[31:1] = 31'd0;
+assign sgt_result[0]    = (~alu_src1[31] & alu_src2[31]) | 
+                          (~(alu_src1[31]^alu_src2[31]) & ~adder_result[31]);
+\end{lstlisting}
+
+4. 结果选择逻辑修改
+\begin{lstlisting}
+// 选择相应结果输出
+    assign alu_result = 
+        (alu_control == 4'b0001) ? add_sub_result :
+        (alu_control == 4'b0010) ? add_sub_result :
+        (alu_control == 4'b0011) ? slt_result :
+        (alu_control == 4'b0100) ? sltu_result :
+        (alu_control == 4'b0101) ? and_result :
+        (alu_control == 4'b0110) ? nor_result :
+        (alu_control == 4'b0111) ? or_result :
+        (alu_control == 4'b1000) ? xor_result :
+        (alu_control == 4'b1001) ? sll_result :
+        (alu_control == 4'b1010) ? srl_result :
+        (alu_control == 4'b1011) ? sra_result :
+        (alu_control == 4'b1100) ? lui_result :
+        (alu_control == 4'b1101) ? sgt_result :
+        (alu_control == 4'b1110) ? xnor_result :
+        (alu_control == 4'b1111) ? lli_result :
+        32'd0;
+\end{lstlisting}
+
+\subsection{alu\_display.v模块修改}
+1. 添加拨码开关输入端口：添加四个拨码开关作为ALU控制信号输入
+\begin{lstlisting}
+// 新增：4位拨码开关作为ALU控制信号(从高到低)
+input alu_ctrl3, // AC22 - 最高位
+input alu_ctrl2, // AC23
+input alu_ctrl1, // AB6
+input alu_ctrl0, // W6 - 最低位
+\end{lstlisting}
+
+2. 修改控制信号输入逻辑：优先使用拨码开关输入，触摸屏输入作为备用
+\begin{lstlisting}
+// ALU控制信号：优先使用拨码开关输入，触摸屏输入作为备用
+always @(posedge clk)
+begin
+    if (!resetn)
+    begin
+        alu_control <= 4'd0;
+    end
+    else if (input_valid && input_sel==2'b00)
+    begin
+        alu_control <= input_value[3:0]; // 触摸屏输入控制信号
+    end
+    else
+    begin
+        alu_control <= {alu_ctrl3, alu_ctrl2, alu_ctrl1, alu_ctrl0}; // 拨码开关输入
+    end
+end
+\end{lstlisting}
+
+3. 修改控制信号显示：调整显示位宽以正确显示4位控制信号
+\begin{lstlisting}
+6'd3 :
+begin
+    display_valid <= 1'b1;
+    display_name  <= "CONTR";
+    display_value <={28'd0, alu_control}; // 显示4位控制信号
+end
+\end{lstlisting}
+
+\subsection{约束文件修改}
+在约束文件中添加四个拨码开关的引脚约束：
+\begin{lstlisting}
+# 新增：ALU控制信号拨码开关(从高到低)
+set_property PACKAGE_PIN AC22 [get_ports alu_ctrl3]
+set_property PACKAGE_PIN AC23 [get_ports alu_ctrl2]
+set_property PACKAGE_PIN AB6  [get_ports alu_ctrl1]
+set_property PACKAGE_PIN W6   [get_ports alu_ctrl0]
+
+set_property IOSTANDARD LVCMOS33 [get_ports alu_ctrl3]
+set_property IOSTANDARD LVCMOS33 [get_ports alu_ctrl2]
+set_property IOSTANDARD LVCMOS33 [get_ports alu_ctrl1]
+set_property IOSTANDARD LVCMOS33 [get_ports alu_ctrl0]
+\end{lstlisting}
+
+% \section{波形仿真验证}
+% 为了验证改进后的ALU功能正确性，我们使用ModelSim进行了波形仿真。
+
+% \subsection{仿真测试平台设计}
+% 设计了一个简单的测试平台，依次设置不同的操作码和操作数，观察ALU的输出结果是否正确。测试用例覆盖了所有15种操作，重点验证了新增的三种操作。
+
+% \subsection{仿真结果分析}
+% % 仿真波形图（注释掉以防编译错误）
+% % \begin{figure}[H]
+% %     \centering
+% %     \includegraphics[width=1\textwidth]{alu_simulation.png}
+% %     \caption{ALU功能仿真波形图}
+% %     \label{fig:simulation}
+% % \end{figure}
+
+% 仿真结果表明：
+% 1. 原有12种操作功能完全正确，与改进前的结果一致
+% 2. 新增的有符号大于置位操作：当alu\_src1=5，alu\_src2=3时，结果为0x00000001；当alu\_src1=3，alu\_src2=5时，结果为0x00000000
+% 3. 新增的按位同或操作：当alu\_src1=0xAAAA5555，alu\_src2=0x5555AAAA时，结果为0x00000000
+% 4. 新增的低位加载操作：当alu\_src2=0x12345678时，结果为0x00005678
+% 5. 所有操作的延迟均在一个时钟周期内，满足时序要求
+
+\section{上箱验证}
+\subsection{硬件连接}
+按照约束文件的设置，将四个拨码开关AC22、AC23、AB6、W6分别连接到ALU控制信号的最高位到最低位。
+
+\subsection{验证步骤}
+1. 将编译好的比特流文件下载到FPGA开发板\\
+\indent2. 通过拨码开关input\_sel选择输入源操作数1和源操作数2，使用触摸屏输入具体数值\\
+\indent3. 通过四个控制拨码开关设置不同的操作码\\
+\indent4. 观察触摸屏上显示的运算结果是否正确
+
+\subsection{验证结果}
+上箱验证结果与仿真结果完全一致：\\
+\indent1. 所有原有操作均能正确执行\\
+\indent2. 新增的三种操作功能正常\\
+\indent3. 拨码开关控制灵敏，操作便捷\\
+\indent4. 触摸屏显示清晰，输入输出正常
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{有符号比较大于置位.jpg}
+    \caption{有符号比较大于置位功能}
+
+\end{figure}
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{按位同或.jpg}
+    \caption{按位同或功能}
+\end{figure}
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=1\textwidth]{低位加载.jpg}
+    \caption{低位加载功能}
+\end{figure}
+
+
+
+\end{document}
