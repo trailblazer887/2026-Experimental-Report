@@ -1,0 +1,235 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage{ctex}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{amsmath}
+
+% 页面设置
+\geometry{left=2.5cm, right=2.5cm, top=2.5cm, bottom=2.5cm}
+
+% 代码高亮设置
+\lstset{
+    language=Verilog,
+    basicstyle=\ttfamily\small,
+    keywordstyle=\color{blue},
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red},
+    numbers=left,
+    numberstyle=\tiny\color{gray},
+    stepnumber=1,
+    numbersep=5pt,
+    backgroundcolor=\color{white},
+    showspaces=false,
+    showstringspaces=false,
+    frame=single,
+    breaklines=true,
+    breakatwhitespace=false,
+    captionpos=b
+}
+
+\title{单周期CPU改进实验报告}
+
+\begin{document}
+
+\maketitle
+
+
+
+\section{实验目的}
+\begin{enumerate}
+    \item 深入理解单周期CPU的工作原理和指令执行流程
+    \item 实现MIPS指令集中的sub（有符号减法）和bgtz（大于零跳转）指令
+    \item 编写汇编程序计算斐波那契数列第10项，验证新增指令的正确性
+    \item 通过实验箱验证，观察CPU的执行过程和最终结果
+\end{enumerate}
+
+\section{实验原理}
+\subsection{单周期CPU基本结构}
+单周期CPU在一个时钟周期内完成一条指令的全部执行过程，包括取指、译码、执行、访存和写回五个阶段。CPU主要由程序计数器PC、指令存储器、寄存器堆、ALU、数据存储器和控制单元组成。
+
+\subsection{新增指令格式与功能}
+\subsubsection{sub指令（R型）}
+sub是有符号减法指令，属于R型指令，其指令格式如下：
+\begin{table}[H]
+\centering
+\begin{tabular}{|c|c|c|c|c|c|}
+\hline
+op(6位) & rs(5位) & rt(5位) & rd(5位) & sa(5位) & funct(6位) \\
+\hline
+000000 & 源寄存器1 & 源寄存器2 & 目标寄存器 & 00000 & 100010 \\
+\hline
+\end{tabular}
+\caption{sub指令格式}
+\end{table}
+功能：将寄存器rs的值减去寄存器rt的值，结果存入寄存器rd中，即$rd = rs - rt$（有符号数运算）。
+
+\subsubsection{bgtz指令（I型）}
+bgtz是大于零跳转指令，属于I型指令，其指令格式如下：
+\begin{table}[H]
+\centering
+\begin{tabular}{|c|c|c|c|}
+\hline
+op(6位) & rs(5位) & 00000(5位) & offset(16位) \\
+\hline
+000111 & 源寄存器 & 保留位 & 偏移量 \\
+\hline
+\end{tabular}
+\caption{bgtz指令格式}
+\end{table}
+功能：如果寄存器rs的值大于0（有符号数），则跳转到目标地址执行。目标地址计算公式为：$PC = PC + offset \times 4$（本实验CPU采用此非标准公式，与原始代码保持一致）。
+
+\section{实现步骤}
+\subsection{新增sub和bgtz指令}
+修改\texttt{single\_cycle\_cpu.v}文件，不改变原有指令的功能。
+
+\subsubsection{添加指令识别}
+在"实现指令列表"部分添加新指令的wire定义和赋值：
+\begin{lstlisting}
+// 新增：有符号减法和大于零跳转指令
+wire inst_SUB, inst_BGTZ;  
+
+// 新增指令解码
+assign inst_SUB = op_zero & sa_zero & (funct == 6'b100010); // 有符号减法
+assign inst_BGTZ  = (op == 6'b000111); // 大于零跳转
+\end{lstlisting}
+
+\subsubsection{添加分支跳转逻辑}
+在"分支跳转"部分添加bgtz指令的跳转条件判断：
+\begin{lstlisting}
+// 新增：bgtz跳转条件
+wire bgtz_taken;
+// BGTZ跳转条件：GPR[rs] > 0（有符号数，最高位为0且非零）
+assign bgtz_taken = (rs_value[31] == 1'b0) && (rs_value != 32'd0);
+\end{lstlisting}
+
+修改跳转信号jbr\_taken，添加bgtz指令的跳转判断：
+\begin{lstlisting}
+assign jbr_taken = j_taken // 指令跳转：无条件跳转 或 满足分支跳转条件
+                 | inst_BEQ & beq_taken
+                 | inst_BNE & bne_taken
+                 | inst_BGTZ & bgtz_taken;  // 新增：大于零跳转
+\end{lstlisting}
+
+\subsubsection{更新ALU控制信号}
+修改inst\_sub赋值，将sub指令加入减法运算：
+\begin{lstlisting}
+assign inst_sub = inst_SUBU | inst_SUB; // 减法（包含有符号和无符号）
+\end{lstlisting}
+
+\subsubsection{更新写回逻辑}
+修改inst\_wdest\_rd赋值，将sub指令加入寄存器写回列表：
+\begin{lstlisting}
+assign inst_wdest_rd = inst_ADDU | inst_SUBU | inst_SUB | inst_SLT | inst_AND | inst_NOR | inst_OR | inst_XOR  | inst_SLL | inst_SRL;                   
+\end{lstlisting}
+
+\subsection{实现斐波那契数列计算}
+修改\texttt{inst\_rom.v}文件，在原有指令之后添加斐波那契计算程序。
+
+\subsubsection{扩展指令存储器}
+将指令存储器大小从20条扩展到32条：
+\begin{lstlisting}
+wire [31:0] inst_rom[31:0];  // 扩展到32条指令
+\end{lstlisting}
+
+\subsubsection{编写斐波那契汇编程序}
+根据实验要求的逻辑，编写计算fib(10)的汇编程序，并适配原始CPU的跳转逻辑：
+\begin{lstlisting}
+// 原有指令保持不变（0-18号，00H-48H）
+assign inst_rom[ 0] = 32'h24010001; // 00H: addiu $1 ,$0,#1
+assign inst_rom[ 1] = 32'h00011100; // 04H: sll   $2 ,$1,#4
+// ... 中间原有指令省略 ...
+assign inst_rom[18] = 32'h3C0C000C; // 48H: lui   $12,#12
+
+// 斐波那契计算指令
+assign inst_rom[19] = 32'h240D000A; // 4CH: addiu $13,$0,#10   | $13=10 (n=10)
+assign inst_rom[20] = 32'h240E0002; // 50H: addiu $14,$0,#2    | $14=2 (idx=2)
+assign inst_rom[21] = 32'h240F0001; // 54H: addiu $15,$0,#1    | $15=1 (fib(1))
+assign inst_rom[22] = 32'h24100001; // 58H: addiu $16,$0,#1    | $16=1 (fib(2))
+assign inst_rom[23] = 32'h01F08821; // 5CH: addu  $17,$15,$16  | Loop入口：计算fib(n)
+assign inst_rom[24] = 32'h25CE0001; // 60H: addiu $14,$14,#1   | idx++
+assign inst_rom[25] = 32'h00107821; // 64H: move  $15,$16       | $15 = fib(n-1)
+assign inst_rom[26] = 32'h00118021; // 68H: move  $16,$17       | $16 = fib(n)
+assign inst_rom[27] = 32'h01AE9022; // 6CH: sub   $18,$13,$14  | $18 = n - idx (验证sub)
+assign inst_rom[28] = 32'h1E40FFFB; // 70H: bgtz  $18,Loop     | 若$18>0跳回5CH(验证bgtz)
+assign inst_rom[29] = 32'hAC110004; // 74H: sw    $17,4($0)    | Mem[1] = fib(10)=55
+assign inst_rom[30] = 32'h08000000; // 78H: j     00H         | 跳转回开头循环执行
+assign inst_rom[31] = 32'd0;        // 7CH: 空指令
+\end{lstlisting}
+
+\subsubsection{更新指令读取逻辑}
+扩展case语句，支持读取32条指令：
+\begin{lstlisting}
+always @(*)
+begin
+    case (addr)
+        5'd0 : inst <= inst_rom[0 ];
+        // ... 中间原有case项省略 ...
+        5'd30: inst <= inst_rom[30];
+        5'd31: inst <= inst_rom[31];
+        default: inst <= 32'd0;
+    endcase
+end
+\end{lstlisting}
+
+\section{实验原理图}
+
+\begin{table}[H]
+\centering
+\caption{斐波那契数列计算汇编指令详解}
+\begin{tabular}{|c|c|c|p{6cm}|}
+\hline
+地址 & 机器码 & 汇编指令 & 功能说明 \\
+\hline
+\multicolumn{4}{|c|}{\textbf{初始化阶段}} \\
+\hline
+4CH & 240D000A & addiu \$13,\$0,\#10 & GPR[13] = 10，存储要计算的项数n=10 \\
+50H & 240E0002 & addiu \$14,\$0,\#2 & GPR[14] = 2，循环计数器idx初始值 \\
+54H & 240F0001 & addiu \$15,\$0,\#1 & GPR[15] = 1，存储fib(1) \\
+58H & 24100001 & addiu \$16,\$0,\#1 & GPR[16] = 1，存储fib(2) \\
+\hline
+\multicolumn{4}{|c|}{\textbf{循环阶段（Loop入口：5CH）}} \\
+\hline
+5CH & 01F08821 & addu \$17,\$15,\$16 & GPR[17] = GPR[15] + GPR[16]，计算当前fib值 \\
+60H & 25CE0001 & addiu \$14,\$14,\#1 & GPR[14] = GPR[14] + 1，计数器加1 \\
+64H & 00107821 & move \$15,\$16 & GPR[15] = GPR[16]，前项后移 \\
+68H & 00118021 & move \$16,\$17 & GPR[16] = GPR[17]，当前项变前项 \\
+6CH & 01AE9022 & sub \$18,\$13,\$14 & GPR[18] = GPR[13] - GPR[14]，计算剩余项数（验证sub指令） \\
+70H & 1E40FFFB & bgtz \$18,Loop & 若GPR[18] > 0则跳转到5CH（验证bgtz指令） \\
+\hline
+\multicolumn{4}{|c|}{\textbf{结束阶段}} \\
+\hline
+74H & AC110004 & sw \$17,4(\$0) & Mem[1] = GPR[17]，将fib(10)存入数据存储器地址4 \\
+78H & 08000000 & j 00H & 无条件跳转到程序开头，循环执行 \\
+\hline
+\end{tabular}
+\end{table}
+
+\section{实验结果}
+
+\subsection{实验箱验证结果}
+将程序下载到FPGA实验箱，通过触摸屏观察结果：
+\begin{enumerate}
+    \item 在触摸屏上输入内存地址4（0x4）
+    \item 观察MDATA显示的值为55（十六进制0x37），与预期一致
+\end{enumerate}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=0.6\textwidth]{实验图.jpg}
+\caption{实验箱运行结果照片}
+\end{figure}
+
+\section{问题与解决}
+在实验过程中遇到了一个关键问题：最初编写的bgtz指令偏移量错误，导致程序跳转到错误的地址，使得寄存器\$16一直在1和2之间跳动。
+
+经过分析发现，原始CPU的分支跳转逻辑采用了非标准的计算公式$PC = PC + offset \times 4$，而不是标准MIPS的$PC = (PC+4) + offset \times 4$。由于实验要求不能修改原有指令，因此不能修改CPU核心的跳转逻辑，只能调整新增指令的偏移量。
+
+重新计算偏移量：目标地址0x5C，bgtz指令地址0x70，因此$offset = (0x5C - 0x70) / 4 = -5$，对应的16位补码为0xFFFB。修改后程序正常运行，得到了正确的结果。
+
+
+
+\end{document}
