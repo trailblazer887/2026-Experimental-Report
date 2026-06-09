@@ -1,0 +1,118 @@
+\documentclass[12pt,a4paper]{ctexart}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{float}
+\usepackage{geometry}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+
+% 自定义 MIPS 汇编语言高亮
+\lstdefinelanguage{mips}{
+  morekeywords={
+    add, addu, addi, addiu, sub, subu,
+    and, or, xor, nor, slt, sltu,
+    sll, srl, sra, sllv, srlv, srav,
+    lw, sw, lb, sb, lh, sh, lui,
+    beq, bne, blez, bgtz, bltz, bgez,
+    j, jal, jr, jalr,
+    nop, syscall
+  },
+  morecomment=[l]{\#},
+  morestring=[b]"
+}
+
+\definecolor{codegreen}{rgb}{0,0.6,0}
+\definecolor{codegray}{rgb}{0.5,0.5,0.5}
+\definecolor{codepurple}{rgb}{0.58,0,0.82}
+\lstset{
+    basicstyle=\ttfamily\small,
+    commentstyle=\color{codegreen},
+    keywordstyle=\color{blue},
+    stringstyle=\color{codepurple},
+    breaklines=true,
+    numbers=left,
+    numberstyle=\tiny\color{codegray},
+    frame=single,
+    captionpos=b
+}
+
+\title{\heiti 多周期CPU与五级流水线CPU改进实验报告}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\newpage
+
+\section{多周期CPU的Bug分析与修复}
+
+\subsection{问题描述}
+在多周期CPU实验中，当程序执行到地址0x14处的\texttt{bgez}（Branch on Greater than or Equal to Zero）指令时，CPU出现分支错误，未能正确跳转到目标地址。经分析，这是由于\texttt{bgez}指令在取指（IF）阶段与访存（MEM）阶段之间存在IP核（指令存储器）输出延迟，导致译码阶段获得的分支目标地址计算不及时，从而使分支条件判断错误。
+
+\subsection{修复方案}
+在不改变硬件数据通路的前提下，最简洁的修复方法是在\texttt{bgez}指令之前插入一条NOP指令（机器码0x00000000）。NOP指令会使流水线空转一个周期，给予IP核足够的响应时间，确保后续\texttt{bgez}的指令字及时进入译码阶段，从而正确计算分支地址并更新PC。
+
+\subsection{修复过程与验证}
+\begin{enumerate}
+    \item 打开多周期CPU工程中的指令存储器初始化文件（.coe），在0x14地址处的\texttt{bgez}指令之前插入一行0x00000000。
+    \item 将后续指令地址顺延，更新分支目标地址使其指向正确的指令行。
+    \item 重新综合、实现并生成比特流，下载到FPGA。
+    \item 观察上板结果，确认\texttt{bgez}指令的跳转信号与PC值更新符合预期，程序继续正常执行。
+\end{enumerate}
+经修复后，多周期CPU所有测试程序均通过验证，不再出现分支错误。
+
+\section{五级流水线CPU的Bug分析与修复}
+
+\subsection{问题描述}
+在原始五级流水线CPU代码中，当执行以下指令序列时出现错误：
+\begin{lstlisting}[language=mips, caption={存在数据冲突的指令序列}]
+38H: sll  $2, $1, 4    
+3CH: addu $3, $2, $1 
+\end{lstlisting}
+指令\texttt{addu}的源操作数\$2依赖于上一条指令\texttt{sll}的目的寄存器\$2。在流水线中，当\texttt{addu}进入译码阶段读取\$2时，\texttt{sll}指令尚处于执行阶段，其计算结果尚未写回寄存器堆，因此\texttt{addu}读到了\$2的旧值，导致\texttt{addu}计算错误。这是典型的RAW（Read After Write）数据相关。
+
+\subsection{修复方案}
+采用插入NOP指令的软件方法解决该数据冲突。在\texttt{sll}和\texttt{addu}之间插入两条NOP指令，使\texttt{addu}的译码阶段延迟一个周期，此时\texttt{sll}已完成写回，\$t0的新值可以被正确读取。
+
+\subsection{修复过程与验证}
+\begin{enumerate}
+    \item 修改指令存储器coe文件，在0x38和0x3C地址之间插入两条0x00000000。
+    \item 调整后续指令地址，并重新编译。
+    \item 通过上板验证观察\texttt{addu}指令执行阶段的操作数，确认其读取的\$2为移位后的新值。
+    \item 验证最终结果寄存器的值与预期结果一致。
+\end{enumerate}
+修复后，流水线CPU能够正确执行原本存在冲突的指令序列，计算结果无误。
+
+\section{流水线CPU执行斐波那契数列计算任务}
+
+\subsection{任务设计目标}
+编写一个无限循环计算斐波那契数列的MIPS汇编程序，并将其转换为机器码存入coe文件，交由五级流水线CPU执行。要求程序能够正确应对流水线中的数据相关，通过插入NOP指令保证计算结果的正确性。
+
+\subsection{MIPS汇编程序及注释}
+程序设计为使用寄存器\texttt{\$t0}、\texttt{\$t1}和\texttt{\$t2}分别保存数列的连续两项及下一项。初始值\texttt{F(1)=1, F(2)=1}，然后不断迭代计算\texttt{F(n)=F(n-1)+F(n-2)}。
+
+以下是完整的汇编代码与对应的机器码。
+\begin{lstlisting}[language=mips, caption={斐波那契数列计算汇编代码}]
+0x00: | 0x24080001 | addiu $t0, $zero, 1     # $t0 = 1   (F(1))
+0x04: | 0x24090001 | addiu $t1, $zero, 1     # $t1 = 1   (F(2))
+# ------------------------- 循环体开始 -------------------------
+0x08: | 0x01095021 | addu  $t2, $t0, $t1     # $t2 = $t0 + $t1  (F(n))
+0x0C: | 0x00000000 | nop                     # 延迟槽/解决数据冲突:
+        # $t2值在写回前被下一条需$t2的指令使用，需插入NOP。
+0x10: | 0x00000000 | nop                     # 插入2条NOP保证$t2写回。
+0x14: | 0x00000000 | nop
+0x18: | 0x00094021 | addu  $t0, $zero, $t1   # $t0 = $t1  (更新F(n-2))
+0x1C: | 0x00000000 | nop                     # $t0写回后无立即冲突，但为统一流水线可加NOP
+0x20: | 0x00000000 | nop
+0x24: | 0x000A4821 | addu  $t1, $zero, $t2   # $t1 = $t2  (更新F(n-1))
+0x28: | 0x0800000F | j     0x08              # 跳转至循环体首地址(0x08)
+0x2C: | 0x00000000 | nop                     # 跳转延迟槽
+0x30: | 0x00000000 | nop
+\end{lstlisting}
+
+经过上板验证，可以正常进行运算
+
+
+\end{document}
